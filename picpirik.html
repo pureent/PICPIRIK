@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Picpirikk Echtzeit Multiplayer</title>
+<style>
+  :root{font-family:Inter,system-ui,Segoe UI,Arial;--card-w:72px;--card-h:100px}
+  body{display:flex;flex-direction:column;align-items:center;padding:18px;background:#f6f8fa;color:#111}
+  h1{margin:6px 0 12px;text-align:center}
+  #board{display:grid;grid-template-columns:1fr 420px 1fr;gap:16px;align-items:start;width:100%;max-width:1100px}
+  .panel{background:white;border-radius:12px;padding:12px;box-shadow:0 6px 18px rgba(20,30,50,.06)}
+  #playerPanel,#opponentPanel{display:flex;flex-direction:column;gap:8px;align-items:center}
+  .hand{display:flex;gap:8px;min-height:var(--card-h)}
+  .card{width:var(--card-w);height:var(--card-h);border-radius:8px;border:1px solid #ddd;display:flex;flex-direction:column;justify-content:space-between;padding:6px;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.04);cursor:pointer;user-select:none}
+  .card.small{width:48px;height:64px;padding:4px;font-size:12px}
+  .hidden{background:linear-gradient(135deg,#b3c7ff,#7f9bff);color:transparent;cursor:default}
+  #pile{min-height:140px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px}
+  #pile .stack{position:relative; width:var(--card-w); height:var(--card-h);}
+  #pile .stack .card {position:absolute;top:0;left:0;}
+  #pile .stack .card.back {background:#7f9bff; border:none; color:transparent;}
+  .controls{display:flex;gap:8px;justify-content:center;padding-top:8px}
+  button{padding:8px 12px;border-radius:8px;border:0;background:#0b72ff;color:#fff;font-weight:600;cursor:pointer}
+  .muted{color:#666;font-size:14px}
+  .log{max-height:180px;overflow:auto;font-size:13px;padding:6px;border-radius:8px;background:#fbfcff}
+  .scoreboard{display:flex;gap:12px;align-items:center;justify-content:center;padding-top:8px}
+  .scorebox{display:flex;flex-direction:column;align-items:center;gap:6px}
+</style>
+</head>
+<body>
+  <h1>Picpirikk Echtzeit Multiplayer</h1>
+  <div id="board">
+    <div class="panel" id="playerPanel">
+      <div class="muted">Du (Spieler 1 oder 2)</div>
+      <div class="hand" id="playerHand"></div>
+      <div class="scoreboard">
+        <div class="scorebox"><div class="muted">Deine gesammelten Karten</div><div id="playerTakenCount">0</div></div>
+      </div>
+      <div class="controls">
+        <button id="newGame" style="display:none">Neues Spiel starten</button>
+      </div>
+    </div>
+
+    <div class="panel" id="centerPanel" style="text-align:center">
+      <div class="muted">Tisch / Stapel</div>
+      <div id="pile">
+        <div class="stack" id="pileStack"></div>
+        <div class="muted" id="deckInfo">Deck: 52</div>
+      </div>
+      <div style="padding-top:12px">
+        <div class="muted">Spiel-Log</div>
+        <div class="log" id="log"></div>
+      </div>
+    </div>
+
+    <div class="panel" id="opponentPanel">
+      <div class="muted">Gegner</div>
+      <div class="hand" id="opponentHand"></div>
+      <div class="scoreboard">
+        <div class="scorebox"><div class="muted">Gesammelte Karten Gegner</div><div id="opponentTakenCount">0</div></div>
+      </div>
+      <div class="muted" style="padding-top:10px">Warte auf Gegner oder auf deinen Zug...</div>
+    </div>
+  </div>
+
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+
+<script>
+const firebaseConfig = {
+  apiKey: "AIzaSyCIU47BWdPgRyon-N4YDP0rQ1VzdnBdQ3s",
+  authDomain: "picpirik-a35df.firebaseapp.com",
+  databaseURL: "https://picpirik-a35df-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "picpirik-a35df",
+  storageBucket: "picpirik-a35df.firebasestorage.app",
+  messagingSenderId: "1089600097639",
+  appId: "1:1089600097639:web:d4a30652784f3c2",
+  measurementId: "G-0HQ4KHZKX8"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+/* --- Karten und Hilfsfunktionen --- */
+const SUITS = ['♠','♥','♦','♣'];
+const RANKS = ['A','2','3','4','5','6','7','8','9','10','J','Q','K'];
+
+function buildDeck(){
+  const deck = [];
+  for(const s of SUITS) for(const r of RANKS) deck.push({suit:s,rank:r,code:r + s});
+  return deck;
+}
+
+function shuffle(array){
+  for(let i = array.length - 1; i > 0; i--){
+    const j = Math.floor(Math.random() * (i + 1));
+    [array[i], array[j]] = [array[j], array[i]];
+  }
+  return array;
+}
+
+/* --- Spielvariablen --- */
+let playerNum = null; // 1 oder 2
+let gameState = null;
+let localHand = [];
+let localTaken = [];
+
+const el = {
+  playerHand: document.getElementById('playerHand'),
+  opponentHand: document.getElementById('opponentHand'),
+  pileStack: document.getElementById('pileStack'),
+  deckInfo: document.getElementById('deckInfo'),
+  log: document.getElementById('log'),
+  playerTakenCount: document.getElementById('playerTakenCount'),
+  opponentTakenCount: document.getElementById('opponentTakenCount'),
+  newGame: document.getElementById('newGame')
+};
+
+/* --- Logging --- */
+function log(msg){
+  const div = document.createElement('div');
+  div.textContent = msg;
+  el.log.prepend(div);
+}
+
+/* --- Firebase Pfad für den einzigen Spielraum --- */
+const roomPath = 'picpirikk_room';
+
+/* --- Spieler anmelden --- */
+async function joinGame(){
+  const playersRef = db.ref(roomPath + '/players');
+  const snapshot = await playersRef.once('value');
+  const players = snapshot.val() || {};
+
+  if(!players.player1){
+    playerNum = 1;
+    await playersRef.update({player1: true});
+    log('Du bist Spieler 1 (mischt das Deck).');
+  } else if(!players.player2){
+    playerNum = 2;
+    await playersRef.update({player2: true});
+    log('Du bist Spieler 2.');
+  } else {
+    alert('Das Spiel ist bereits mit 2 Spielern voll.');
+    return false;
+  }
+  listenGameState();
+  return true;
+}
+
+/* --- Spielstand überwachen --- */
+function listenGameState(){
+  db.ref(roomPath + '/state').on('value', snapshot => {
+    gameState = snapshot.val();
+    if(gameState){
+      updateLocalFromState();
+      renderAll();
+    }
+  });
+}
+
+/* --- Update lokale Variablen aus Firebase --- */
+function updateLocalFromState(){
+  if(!gameState) return;
+  localHand = gameState.hands[`player${playerNum}`] || [];
+  localTaken = gameState.taken[`player${playerNum}`] || [];
+  el.deckInfo.textContent = `Deck: ${gameState.deck.length}`;
+  // Falls Spiel beendet:
+  if(gameState.finished){
+    log('Spiel beendet!');
+    alert(`Spiel beendet! Ergebnisse:\nSpieler 1 Punkte: ${gameState.points.player1}\nSpieler 2 Punkte: ${gameState.points.player2}`);
+    el.newGame.style.display = 'inline-block';
+  }
+}
+
+/* --- Karten rendern --- */
+function renderCard(c, opts={}){
+  const div = document.createElement('div');
+  div.className = 'card' + (opts.small ? ' small' : '') + (opts.hidden ? ' hidden' : '');
+  div.dataset.code = c.code;
+  div.textContent = c.rank + c.suit;
+  return div;
+}
+
+function renderAll(){
+  // Eigene Hand
+  el.playerHand.innerHTML = '';
+  localHand.forEach((c, idx) => {
+    const card = renderCard(c);
+    if(gameState.currentPlayer === `player${playerNum}` && !gameState.finished){
+      card.style.cursor = 'pointer';
+      card.onclick = () => playCard(idx);
+    } else {
+      card.style.cursor = 'default';
+      card.onclick = null;
+    }
+    el.playerHand.appendChild(card);
+  });
+
+  // Gegnerhand als verdeckte Karten
+  el.opponentHand.innerHTML = '';
+  const opponentNum = playerNum === 1 ? 2 : 1;
+  const opponentHandCount = (gameState.hands && gameState.hands[`player${opponentNum}`]) ? gameState.hands[`player${opponentNum}`].length : 0;
+  for(let i=0; i<opponentHandCount; i++){
+    const backCard = document.createElement('div');
+    backCard.className = 'card hidden';
+    el.opponentHand.appendChild(backCard);
+  }
+
+  // Stapel: Anfang 2 verdeckte Karten + oberste sichtbare Karte, sonst nur oberste Karte
+  el.pileStack.innerHTML = '';
+  if(gameState.pile.length === 0){
+    // keine Karten
+  } else if(gameState.deck.length === 52 && gameState.pile.length === 4){
+    // Anfang: 2 verdeckte Karten + 1 sichtbare + 1 verdeckte Karte
+    for(let i=0; i<2; i++){
+      const back = document.createElement('div');
+      back.className = 'card back';
+      back.style.top = `${i*2}px`;
+      back.style.left = `${i*2}px`;
+      el.pileStack.appendChild(back);
+    }
+    // Die drittletzte Karte sichtbar (Index pile.length-2)
+    const visibleCard = gameState.pile[gameState.pile.length - 2];
+    if(visibleCard) el.pileStack.appendChild(renderCard(visibleCard));
+
+    // Oberste Karte verdeckt oben drauf
+    const lastBack = document.createElement('div');
+    lastBack.className = 'card back';
+    lastBack.style.top = '4px';
+    lastBack.style.left = '4px';
+    el.pileStack.appendChild(lastBack);
+  } else {
+    // Nur oberste Karte sichtbar (ganz oben)
+    const topCard = gameState.pile[gameState.pile.length - 1];
+    if(topCard) el.pileStack.appendChild(renderCard(topCard));
+  }
+
+  el.playerTakenCount.textContent = localTaken.length;
+  el.opponentTakenCount.textContent = gameState.taken[`player${playerNum === 1 ? 2 : 1}`]?.length || 0;
+}
+
+/* --- Karte spielen --- */
+function playCard(cardIndex){
+  if(gameState.finished) return;
+  if(gameState.currentPlayer !== `player${playerNum}`) return;
+
+  // Karte wählen und zum Server senden
+  const card = localHand[cardIndex];
+  if(!card) return;
+
+  // Sende Spielzug an Server (Transaktion)
+  const stateRef = db.ref(roomPath + '/state');
+  stateRef.transaction(state => {
+    if(!state || state.finished) return state; // Spiel beendet oder keine Daten
+
+    if(state.currentPlayer !== `player${playerNum}`) return; // nicht dein Zug
+
+    // Prüfe Karte in deiner Hand
+    if(!state.hands[`player${playerNum}`].some(c => c.code === card.code)) return;
+
+    // Karte aus Hand entfernen
+    state.hands[`player${playerNum}`] = state.hands[`player${playerNum}`].filter(c => c.code !== card.code);
+
+    // Karte auf Stapel legen
+    state.pile.push(card);
+
+    // Prüfe ob Aufnahme
+    let capture = false;
+    let pisti = false;
+    const pileLen = state.pile.length;
+    const top = state.pile[pileLen - 1];
+    const prev = pileLen > 1 ? state.pile[pileLen - 2] : null;
+
+    if(prev){
+      if(top.rank === prev.rank){
+        capture = true;
+        if(pileLen === 2) pisti = true;
+      } else if(top.rank === 'J'){
+        capture = true;
+        if(pileLen === 1) pisti = true;
+      }
+    }
+
+    if(capture){
+      // Aufnahme: Alle Karten gehen an currentPlayer
+      state.taken[`player${playerNum}`] = (state.taken[`player${playerNum}`] || []).concat(state.pile);
+      state.pile = [];
+      state.lastTaker = `player${playerNum}`;
+      if(pisti){
+        state.pistiBonus = state.pistiBonus || {};
+        state.pistiBonus[`player${playerNum}`] = (state.pistiBonus[`player${playerNum}`] || 0) + (top.rank === 'J' ? 20 : 10);
+      }
+    }
+
+    // Nächster Spieler
+    state.currentPlayer = playerNum === 1 ? 'player2' : 'player1';
+
+    // Wenn Hände leer und Deck Karten vorhanden, neu austeilen
+    if(state.hands.player1.length === 0 && state.hands.player2.length === 0){
+      if(state.deck.length > 0){
+        for(let i=0; i<4; i++){
+          if(state.deck.length === 0) break;
+          state.hands.player1.push(state.deck.pop());
+          if(state.deck.length === 0) break;
+          state.hands.player2.push(state.deck.pop());
+        }
+      } else {
+        // Spielende wenn Deck leer und Hände leer
+        if(state.pile.length > 0 && state.lastTaker){
+          state.taken[state.lastTaker] = (state.taken[state.lastTaker] || []).concat(state.pile);
+          state.pile = [];
+        }
+
+        // Punkte berechnen
+        if(!state.finished){
+          state.points = calculatePoints(state.taken, state.pistiBonus || {});
+          state.finished = true;
+        }
+      }
+    }
+    return state;
+  });
+}
+
+/* --- Punkteberechnung --- */
+function calculatePoints(taken, pistiBonus){
+  // Einzelpunkt für J,Q,K,A
+  function cardPoints(c){
+    if(!c) return 0;
+    if(['J','Q','K','A'].includes(c.rank)) return 1;
+    if(c.rank === '2' && c.suit === '♣') return 2;
+    if(c.rank === '10' && c.suit === '♦') return 3;
+    return 0;
+  }
+
+  let p1Points = pistiBonus.player1 || 0;
+  let p2Points = pistiBonus.player2 || 0;
+
+  let p1Count = taken.player1.length;
+  let p2Count = taken.player2.length;
+
+  for(const c of taken.player1) p1Points += cardPoints(c);
+  for(const c of taken.player2) p2Points += cardPoints(c);
+
+  // Mehrheitsbonus
+  if(p1Count > p2Count) p1Points += 3;
+  else if(p2Count > p1Count) p2Points += 3;
+
+  return {player1: p1Points, player2: p2Points};
+}
+
+/* --- Spiel starten --- */
+async function startGame(){
+  const stateRef = db.ref(roomPath + '/state');
+  const snap = await stateRef.once('value');
+  let state = snap.val();
+
+  if(state && !state.finished){
+    log('Spiel läuft bereits...');
+    return;
+  }
+
+  // Neues Deck mischen
+  let deck = buildDeck();
+  shuffle(deck);
+
+  // Anfang: 4 Karten auf Stapel, 4 Karten an jeden Spieler
+  const pile = deck.splice(0,4);
+  const hands = {
+    player1: deck.splice(0,4),
+    player2: deck.splice(0,4)
+  };
+
+  // Initialer Spielzustand
+  state = {
+    deck,
+    pile,
+    hands,
+    taken: {player1: [], player2: []},
+    currentPlayer: 'player1',
+    lastTaker: null,
+    pistiBonus: {},
+    finished: false,
+    points: {player1:0, player2:0}
+  };
+
+  await stateRef.set(state);
+  log('Neues Spiel gestartet!');
+  el.newGame.style.display = 'none';
+}
+
+/* --- Neues Spiel Knopf --- */
+el.newGame.onclick = () => {
+  if(playerNum === 1){
+    startGame();
+  } else {
+    alert('Nur Spieler 1 kann ein neues Spiel starten.');
+  }
+};
+
+/* --- Beim Laden --- */
+(async () => {
+  const joined = await joinGame();
+  if(!joined) return;
+
+  // Wenn Spieler 1, kann neues Spiel starten
+  if(playerNum === 1){
+    el.newGame.style.display = 'inline-block';
+  }
+
+  listenGameState();
+})();
+</script>
+</body>
+</html>
